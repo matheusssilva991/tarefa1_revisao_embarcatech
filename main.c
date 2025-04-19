@@ -7,6 +7,7 @@
 #include "hardware/pio.h"
 #include "hardware/adc.h"
 #include "hardware/timer.h"
+#include "hardware/clocks.h"
 
 #include "lib/ssd1306.h"
 #include "lib/font.h"
@@ -50,30 +51,32 @@ int get_rect_delta_y(rect_t *rect, int vry_value, int speed);
 int random_number(int min, int max);
 int xy_to_index(int x, int y);
 void gpio_irq_handler(uint gpio, uint32_t events);
+bool blink_red_led_callback(struct repeating_timer *t);
+void signal_life_status(int8_t life);
 
 // Variáveis globais
 static volatile int64_t last_valid_press_time_btn_a = 0;
 static volatile int64_t last_valid_press_time_btn_b = 0;
 static volatile int8_t spaceship_index = 2;
+struct repeating_timer red_led_timer;
+bool red_led_timer_active = false;
 
 int main()
 {
     stdio_init_all();
-    srand(time_us_32());
+    srand(time_us_32()); // Inicializa o gerador de números aleatórios
 
-    // Inicializa o display OLED
     ssd1306_t ssd; // Inicializa a estrutura do display
-    uint16_t vrx_value_raw;
-    uint16_t vry_value_raw;
+    uint16_t vrx_value_raw; // Inicializa o valor bruto do eixo X
+    uint16_t vry_value_raw; // Inicializa o valor bruto do eixo Y
     rect_t rect; // Inicializa a estrutura do retângulo
-    bool has_meteor = false;
-    int meteor_index = 0;
-    static int8_t meteor_x;
-    static int8_t meteor_y;
+    bool has_meteor = false; // Inicializa a variável de controle do meteorito
+    int meteor_index = 0; // Inicializa o índice do meteorito
+    static int8_t meteor_x; // Inicializa a posição x do meteorito
+    static int8_t meteor_y; // Inicializa a posição y do meteorito
+    int8_t life = 3; // Inicializa a vida do jogador
 
-    // Inicializa o retângulo
     init_rectangle(&rect, (DISPLAY_WIDTH - RECT_SIZE) / 2, (DISPLAY_HEIGHT - RECT_SIZE) / 2, RECT_SIZE, RECT_SIZE);
-
     init_leds();
     init_btns();
     init_i2c();
@@ -83,7 +86,7 @@ int main()
     init_joystick();
 
     gpio_set_irq_enabled_with_callback(BTN_A_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
-    gpio_set_irq_enabled_with_callback(BTN_B_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+    gpio_set_irq_enabled(BTN_B_PIN, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(SW_PIN, GPIO_IRQ_EDGE_FALL, true);
 
     while (true) {
@@ -92,8 +95,8 @@ int main()
         vry_value_raw = ADC_MAX_VALUE - vry_value_raw; // Inverte o eixo Y
 
         // Calcula o delta a partir do centro
-        int delta_x = get_rect_delta_x(&rect, vrx_value_raw, 100);
-        int delta_y = get_rect_delta_y(&rect, vry_value_raw, 100);
+        int delta_x = get_rect_delta_x(&rect, vrx_value_raw, 80);
+        int delta_y = get_rect_delta_y(&rect, vry_value_raw, 80);
 
         // Atualiza a posição do retângulo
         set_rectangle_position(&rect, rect.x + delta_x, rect.y + delta_y);
@@ -119,12 +122,17 @@ int main()
         // Verifica se o retângulo colidiu com o meteorito
         if (spaceship_index == meteor_index) {
             ws2812b_set_led(meteor_index, 8, 8, 0); // Atualiza o LED
-            printf("Meteor hit!\n");
-            has_meteor = false;
             ws2812b_write();
+
+            printf("Meteor hit!\n");
+            life--;
+
+            has_meteor = false;
             sleep_ms(500);
             continue;
         }
+
+        signal_life_status(life);
 
         // Desenha o LED da matriz
         ws2812b_write();
@@ -287,5 +295,50 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
     } else if (gpio == SW_PIN) {
         printf("SW pressed\n");
         reset_usb_boot(0, 0);
+    }
+}
+
+// Função Callback para piscar o LED
+bool blink_red_led_callback(struct repeating_timer *t) {
+    gpio_put(RED_LED_PIN, !gpio_get(RED_LED_PIN));
+    printf("Blinking red LED\n");
+
+    return true; // Retorna true para continuar repetindo
+}
+
+// Função para sinalizar o status da vida
+// 3 vidas: Verde, 2 vidas: Azul, 1 vida: Pisca vermelho, 0 vidas: Vermelho fixo
+void signal_life_status(int8_t life) {
+    switch(life) {
+        case 3:
+            gpio_put(GREEN_LED_PIN, 1);  // Verde significa vida cheia
+            gpio_put(RED_LED_PIN, 0);
+            gpio_put(BLUE_LED_PIN, 0);
+            break;
+        case 2:
+            gpio_put(BLUE_LED_PIN, 1);   // Azul significa 2 vidas
+            gpio_put(GREEN_LED_PIN, 0);
+            gpio_put(RED_LED_PIN, 0);
+            break;
+        case 1:
+            gpio_put(BLUE_LED_PIN, 0);
+            gpio_put(GREEN_LED_PIN, 0);
+
+            if (!red_led_timer_active) {
+                add_repeating_timer_ms(-500, blink_red_led_callback, NULL, &red_led_timer); // Pisca vermelho 3x quando só tem 1 vida
+                red_led_timer_active = true;
+            }
+
+            break;
+        case 0:
+            printf("Game Over\n");
+
+            if (red_led_timer_active) {
+                cancel_repeating_timer(&red_led_timer);
+                red_led_timer_active = false;
+                gpio_put(RED_LED_PIN, 1);    // Vermelho fixo significa game over
+            }
+
+            break;
     }
 }
