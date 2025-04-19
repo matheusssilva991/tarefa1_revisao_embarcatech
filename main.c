@@ -1,11 +1,12 @@
 #include <stdio.h>
-#include "pico/stdlib.h"
 #include <time.h>
 
+#include "pico/stdlib.h"
+#include "pico/bootrom.h"
 #include "hardware/i2c.h"
 #include "hardware/pio.h"
 #include "hardware/adc.h"
-#include "pico/bootrom.h"
+#include "hardware/timer.h"
 
 #include "lib/ssd1306.h"
 #include "lib/font.h"
@@ -48,11 +49,12 @@ int get_rect_delta_x(rect_t *rect, int vrx_value, int speed);
 int get_rect_delta_y(rect_t *rect, int vry_value, int speed);
 int random_number(int min, int max);
 int xy_to_index(int x, int y);
+void gpio_irq_handler(uint gpio, uint32_t events);
 
 // Variáveis globais
 static volatile int64_t last_valid_press_time_btn_a = 0;
 static volatile int64_t last_valid_press_time_btn_b = 0;
-static volatile int64_t last_valid_press_time_sw = 0;
+static volatile int8_t spaceship_index = 2;
 
 int main()
 {
@@ -64,6 +66,10 @@ int main()
     uint16_t vrx_value_raw;
     uint16_t vry_value_raw;
     rect_t rect; // Inicializa a estrutura do retângulo
+    bool has_meteor = false;
+    int meteor_index = 0;
+    static int8_t meteor_x;
+    static int8_t meteor_y;
 
     // Inicializa o retângulo
     init_rectangle(&rect, (DISPLAY_WIDTH - RECT_SIZE) / 2, (DISPLAY_HEIGHT - RECT_SIZE) / 2, RECT_SIZE, RECT_SIZE);
@@ -76,13 +82,9 @@ int main()
     adc_init();
     init_joystick();
 
-    //gpio_set_irq_enabled_with_callback(BTN_A_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
-    //gpio_set_irq_enabled(BTN_B_PIN, GPIO_IRQ_EDGE_FALL, true);
-
-    bool has_meteor = false;
-    int meteor_index = 0;
-    static int meteor_x;
-    static int meteor_y;
+    gpio_set_irq_enabled_with_callback(BTN_A_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+    gpio_set_irq_enabled_with_callback(BTN_B_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
+    gpio_set_irq_enabled(SW_PIN, GPIO_IRQ_EDGE_FALL, true);
 
     while (true) {
         // Lê os valores do joystick
@@ -109,18 +111,29 @@ int main()
 
         meteor_index = xy_to_index(meteor_x, meteor_y);
 
+        // Atualiza o LED da matriz
         ws2812b_clear();
         ws2812b_set_led(meteor_index, 8, 0, 0); // Atualiza o LED
-        ws2812b_set_led(2, 0, 0, 8); // Limpa o LED
-        ws2812b_write();
+        ws2812b_set_led(spaceship_index, 0, 0, 8); // Limpa o LED
 
-        if (gpio_get(BTN_A_PIN) == 0) {
-            reset_usb_boot(0, 0);
+        // Verifica se o retângulo colidiu com o meteorito
+        if (spaceship_index == meteor_index) {
+            ws2812b_set_led(meteor_index, 8, 8, 0); // Atualiza o LED
+            printf("Meteor hit!\n");
+            has_meteor = false;
+            ws2812b_write();
+            sleep_ms(500);
+            continue;
         }
 
+        // Desenha o LED da matriz
+        ws2812b_write();
+
+        // Atualiza a posição do meteorito
         meteor_y--;
 
-        if (meteor_index < 0) {
+        // Verifica se o meteorito saiu da tela
+        if (meteor_y < 0) {
             has_meteor = false;
         }
 
@@ -243,5 +256,36 @@ int xy_to_index(int x, int y) {
     // Se a linha é ímpar, a ordem é da direita para esquerda
     else {
         return y * LED_MATRIX_SIZE + (LED_MATRIX_SIZE - 1 - x);
+    }
+}
+
+// Função de interrupção para os botões
+void gpio_irq_handler(uint gpio, uint32_t events) {
+    int64_t current_time = to_ms_since_boot(get_absolute_time());
+
+    if (gpio == BTN_A_PIN && current_time - last_valid_press_time_btn_a > 275) {
+        last_valid_press_time_btn_a = to_ms_since_boot(get_absolute_time());
+
+        if (spaceship_index < 4) {
+            spaceship_index++;
+        } else {
+            spaceship_index = 4;
+        }
+
+        printf("Space index 1: %d\n", spaceship_index);
+
+    } else if (gpio == BTN_B_PIN && current_time - last_valid_press_time_btn_b > 275) {
+        last_valid_press_time_btn_b = to_ms_since_boot(get_absolute_time());
+
+        if (spaceship_index > 0) {
+            spaceship_index--;
+        } else {
+            spaceship_index = 0;
+        }
+
+        printf("Space index 2: %d\n", spaceship_index);
+    } else if (gpio == SW_PIN) {
+        printf("SW pressed\n");
+        reset_usb_boot(0, 0);
     }
 }
