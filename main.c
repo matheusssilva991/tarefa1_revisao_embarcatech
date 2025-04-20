@@ -56,6 +56,7 @@ int xy_to_index(int x, int y);
 void gpio_irq_handler(uint gpio, uint32_t events);
 bool blink_red_led_callback(struct repeating_timer *t);
 void signal_life_status(int8_t life);
+void update_elapsed_time(void);
 
 // Variáveis globais
 static volatile int64_t last_valid_press_time_btn_a = 0; // Tempo do último pressionamento do botão A
@@ -64,6 +65,8 @@ static volatile int8_t spaceship_index = 2; // Índice do LED da nave
 struct repeating_timer red_led_timer; // Timer para piscar o LED vermelho
 bool red_led_timer_active = false; // Variável de controle do timer
 static volatile bool game_started = false; // Variável de controle do jogo
+static volatile uint32_t start_time = 0;
+static volatile uint32_t elapsed_seconds = 0;
 
 int main()
 {
@@ -116,6 +119,10 @@ int main()
         ssd1306_send_data(&ssd); // Envia os dados para o display
 
         if (game_started) {
+            printf("Time survived: %d\n", elapsed_seconds);
+            printf("Life: %d\n", life);
+            update_elapsed_time(); // Atualiza o tempo decorrido
+
             // Verifica se há um meteorito
             if (!has_meteor) {
                 meteor_y = 4;
@@ -138,7 +145,6 @@ int main()
 
                 life--;
                 printf("Meteor hit!\n");
-                printf("Life: %d\n", life);
 
                 has_meteor = false;
                 play_tone(BUZZER_A_PIN, 300); // Toca um tom de buzzer
@@ -167,6 +173,7 @@ int main()
                 life = 3; // Reseta a vida
                 spaceship_index = 2; // Reseta a nave para o meio
                 printf("Game Over\n");
+                printf("Time survived: %d\n", elapsed_seconds);
             }
         }
 
@@ -302,8 +309,11 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
 
         if (!game_started) {
             game_started = true;
+            start_time = time_us_32(); // Marca o tempo de início do jogo
+            elapsed_seconds = 0; // Reseta o tempo decorrido
             spaceship_index = 2; // Reseta a nave para o meio
             printf("Game started\n");
+
         } else {
             if (spaceship_index < 4) {
                 spaceship_index++;
@@ -317,6 +327,8 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
 
         if (!game_started) {
             game_started = true;
+            start_time = time_us_32(); // Marca o tempo de início do jogo
+            elapsed_seconds = 0; // Reseta o tempo decorrido
             spaceship_index = 2; // Reseta a nave para o meio
             printf("Game started\n");
         } else {
@@ -394,4 +406,13 @@ void play_tone(uint pin, uint frequency) {
 
     pwm_set_wrap(slice_num, top);
     pwm_set_gpio_level(pin, top / 2); // 50% de duty cycle
+}
+
+// Atualiza o tempo decorrido desde o início do jogo
+void update_elapsed_time(void) {
+    uint32_t current_time = time_us_32();
+    uint32_t diff = current_time - start_time;
+
+    // Converte microssegundos para segundos
+    elapsed_seconds = diff / 1000000;
 }
