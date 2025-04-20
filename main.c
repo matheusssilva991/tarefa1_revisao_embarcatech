@@ -3,11 +3,13 @@
 
 #include "pico/stdlib.h"
 #include "pico/bootrom.h"
+
 #include "hardware/i2c.h"
 #include "hardware/pio.h"
 #include "hardware/adc.h"
 #include "hardware/timer.h"
 #include "hardware/clocks.h"
+#include "hardware/pwm.h"
 
 #include "lib/ssd1306.h"
 #include "lib/font.h"
@@ -27,7 +29,6 @@
 #define BTN_A_PIN 5
 #define BTN_B_PIN 6
 #define BUZZER_A_PIN 21
-#define BUZZER_B_PIN 10
 #define VRX_PIN 27
 #define VRY_PIN 26
 #define SW_PIN 22
@@ -45,6 +46,8 @@ void init_btns();
 void init_i2c();
 void init_display(ssd1306_t *ssd);
 void init_joystick();
+void pwm_init_buzzer(uint pin);
+void play_tone(uint pin, uint frequency);
 void read_joystick_xy_values(uint16_t *x_value, uint16_t *y_value);
 int get_rect_delta_x(rect_t *rect, int vrx_value, int speed);
 int get_rect_delta_y(rect_t *rect, int vry_value, int speed);
@@ -55,11 +58,12 @@ bool blink_red_led_callback(struct repeating_timer *t);
 void signal_life_status(int8_t life);
 
 // Variáveis globais
-static volatile int64_t last_valid_press_time_btn_a = 0;
-static volatile int64_t last_valid_press_time_btn_b = 0;
-static volatile int8_t spaceship_index = 2;
-struct repeating_timer red_led_timer;
-bool red_led_timer_active = false;
+static volatile int64_t last_valid_press_time_btn_a = 0; // Tempo do último pressionamento do botão A
+static volatile int64_t last_valid_press_time_btn_b = 0; // Tempo do último pressionamento do botão B
+static volatile int8_t spaceship_index = 2; // Índice do LED da nave
+struct repeating_timer red_led_timer; // Timer para piscar o LED vermelho
+bool red_led_timer_active = false; // Variável de controle do timer
+static volatile bool game_started = false; // Variável de controle do jogo
 
 int main()
 {
@@ -81,6 +85,7 @@ int main()
     init_btns();
     init_i2c();
     init_display(&ssd);
+    pwm_init_buzzer(BUZZER_A_PIN);
     ws2812b_init(LED_MATRIX_PIN); // Inicializa a matriz de LEDs
     adc_init();
     init_joystick();
@@ -88,6 +93,10 @@ int main()
     gpio_set_irq_enabled_with_callback(BTN_A_PIN, GPIO_IRQ_EDGE_FALL, true, &gpio_irq_handler);
     gpio_set_irq_enabled(BTN_B_PIN, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(SW_PIN, GPIO_IRQ_EDGE_FALL, true);
+
+    ws2812b_clear();
+    ws2812b_set_led(spaceship_index, 0, 0, 8); // Inicializa a nave
+    ws2812b_write(); // Atualiza a matriz de LEDs
 
     while (true) {
         // Lê os valores do joystick
@@ -106,44 +115,61 @@ int main()
         ssd1306_rect(&ssd, rect.y, rect.x, rect.width, rect.height, true, true);
         ssd1306_send_data(&ssd); // Envia os dados para o display
 
-        if (!has_meteor) {
-            meteor_y = 4;
-            meteor_x = random_number(0, 4); // Posição x aleatória
-            has_meteor = true;
-        }
+        if (game_started) {
+            // Verifica se há um meteorito
+            if (!has_meteor) {
+                meteor_y = 4;
+                meteor_x = random_number(0, 4); // Posição x aleatória
+                has_meteor = true;
+            }
 
-        meteor_index = xy_to_index(meteor_x, meteor_y);
+            // Pega o indice do meteorito
+            meteor_index = xy_to_index(meteor_x, meteor_y);
 
-        // Atualiza o LED da matriz
-        ws2812b_clear();
-        ws2812b_set_led(meteor_index, 8, 0, 0); // Atualiza o LED
-        ws2812b_set_led(spaceship_index, 0, 0, 8); // Limpa o LED
+            // Atualiza o LED da matriz
+            ws2812b_clear();
+            ws2812b_set_led(meteor_index, 8, 0, 0); // Atualiza o LED
+            ws2812b_set_led(spaceship_index, 0, 0, 8); // Limpa o LED
 
-        // Verifica se o retângulo colidiu com o meteorito
-        if (spaceship_index == meteor_index) {
-            ws2812b_set_led(meteor_index, 8, 8, 0); // Atualiza o LED
+            // Verifica se o retângulo colidiu com o meteorito
+            if (spaceship_index == meteor_index) {
+                ws2812b_set_led(meteor_index, 8, 8, 0); // Exibe uma explosão
+                ws2812b_write();
+
+                life--;
+                printf("Meteor hit!\n");
+                printf("Life: %d\n", life);
+
+                has_meteor = false;
+                play_tone(BUZZER_A_PIN, 300); // Toca um tom de buzzer
+                sleep_ms(500);
+                pwm_set_gpio_level(BUZZER_A_PIN, 0); // Desliga o buzzer
+                continue;
+            }
+
+            signal_life_status(life);
+
+            // Desenha o LED da matriz
             ws2812b_write();
 
-            printf("Meteor hit!\n");
-            life--;
+            // Atualiza a posição do meteorito
+            meteor_y--;
 
-            has_meteor = false;
-            sleep_ms(500);
-            continue;
+            // Verifica se o meteorito saiu da tela
+            if (meteor_y < 0) {
+                has_meteor = false;
+            }
+
+            // Game over
+            if (life <= 0) {
+                game_started = false;
+                has_meteor = false;
+                life = 3; // Reseta a vida
+                spaceship_index = 2; // Reseta a nave para o meio
+                printf("Game Over\n");
+            }
         }
 
-        signal_life_status(life);
-
-        // Desenha o LED da matriz
-        ws2812b_write();
-
-        // Atualiza a posição do meteorito
-        meteor_y--;
-
-        // Verifica se o meteorito saiu da tela
-        if (meteor_y < 0) {
-            has_meteor = false;
-        }
 
         sleep_ms(150);
     }
@@ -274,24 +300,32 @@ void gpio_irq_handler(uint gpio, uint32_t events) {
     if (gpio == BTN_A_PIN && current_time - last_valid_press_time_btn_a > 275) {
         last_valid_press_time_btn_a = to_ms_since_boot(get_absolute_time());
 
-        if (spaceship_index < 4) {
-            spaceship_index++;
+        if (!game_started) {
+            game_started = true;
+            spaceship_index = 2; // Reseta a nave para o meio
+            printf("Game started\n");
         } else {
-            spaceship_index = 4;
+            if (spaceship_index < 4) {
+                spaceship_index++;
+            } else {
+                spaceship_index = 4;
+            }
         }
-
-        printf("Space index 1: %d\n", spaceship_index);
 
     } else if (gpio == BTN_B_PIN && current_time - last_valid_press_time_btn_b > 275) {
         last_valid_press_time_btn_b = to_ms_since_boot(get_absolute_time());
 
-        if (spaceship_index > 0) {
-            spaceship_index--;
+        if (!game_started) {
+            game_started = true;
+            spaceship_index = 2; // Reseta a nave para o meio
+            printf("Game started\n");
         } else {
-            spaceship_index = 0;
+            if (spaceship_index > 0) {
+                spaceship_index--;
+            } else {
+                spaceship_index = 0;
+            }
         }
-
-        printf("Space index 2: %d\n", spaceship_index);
     } else if (gpio == SW_PIN) {
         printf("SW pressed\n");
         reset_usb_boot(0, 0);
@@ -325,14 +359,12 @@ void signal_life_status(int8_t life) {
             gpio_put(GREEN_LED_PIN, 0);
 
             if (!red_led_timer_active) {
-                add_repeating_timer_ms(-500, blink_red_led_callback, NULL, &red_led_timer); // Pisca vermelho 3x quando só tem 1 vida
+                add_repeating_timer_ms(-250, blink_red_led_callback, NULL, &red_led_timer); // Pisca vermelho 3x quando só tem 1 vida
                 red_led_timer_active = true;
             }
 
             break;
         case 0:
-            printf("Game Over\n");
-
             if (red_led_timer_active) {
                 cancel_repeating_timer(&red_led_timer);
                 red_led_timer_active = false;
@@ -341,4 +373,25 @@ void signal_life_status(int8_t life) {
 
             break;
     }
+}
+
+// Inicializa o PWM no pino do buzzer
+void pwm_init_buzzer(uint pin) {
+    gpio_set_function(pin, GPIO_FUNC_PWM);
+    uint slice_num = pwm_gpio_to_slice_num(pin);
+    pwm_config config = pwm_get_default_config();
+    pwm_config_set_clkdiv(&config, 4.0f); // Ajusta divisor de clock
+    pwm_init(slice_num, &config, true);
+    pwm_set_gpio_level(pin, 0); // Desliga o PWM inicialmente
+}
+
+// Toca uma nota com a frequência
+void play_tone(uint pin, uint frequency) {
+
+    uint slice_num = pwm_gpio_to_slice_num(pin);
+    uint32_t clock_freq = clock_get_hz(clk_sys);
+    uint32_t top = clock_freq / frequency - 1;
+
+    pwm_set_wrap(slice_num, top);
+    pwm_set_gpio_level(pin, top / 2); // 50% de duty cycle
 }

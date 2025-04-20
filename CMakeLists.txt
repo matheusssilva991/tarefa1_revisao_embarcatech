@@ -57,6 +57,7 @@ target_link_libraries(${PROJECT_NAME}
         hardware_adc
         hardware_clocks
         hardware_timer
+        hardware_pwm
         )
 
 pico_add_extra_outputs(${PROJECT_NAME})
